@@ -1,2 +1,2 @@
-fins>=2.0.0
+fins>=1.0.5
 requests>=2.28.0
