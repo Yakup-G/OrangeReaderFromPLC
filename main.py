@@ -41,34 +41,53 @@ LOGGER = setup_logger()
 
 
 def create_payload(raw_data: dict) -> dict:
-    """Agent'tan sunucuya gönderilecek veriyi hazırlar"""
+    """
+    PLC'den okunan ham verileri akıllıca işleyip sunucuya uygun formata çevirir.
+    """
     def get(label: str, default=0.0):
         val = raw_data.get(label)
         return default if val is None else val
 
-    running = bool(int(get("Çalışma Durumu", 0)))
-    fault_code = int(get("Arıza Kodu", 0))
-    hours = round(get("Çalışma Saati", 0.0), 1)
+    # Ham verileri al
+    calisma_durumu = bool(int(get("Çalışma Durumu", 0)))
+    ariza_kodu     = int(get("Arıza Kodu", 0))
+    calisma_saati  = round(get("Çalışma Saati", 0.0), 1)
+    sicaklik       = get("Sıcaklık")
+    devir          = get("Devir")
 
-    if fault_code != 0:
-        status = "err"
-    elif not running:
-        status = "off"
+    # ── Akıllı Status Hesaplaması ──
+    if ariza_kodu != 0:
+        status = "err"      # Arıza öncelikli
+    elif not calisma_durumu:
+        status = "off"      # Makine kapalı
+    elif calisma_saati > 0:
+        status = "on"       # Çalışıyor
     else:
-        status = "on"
+        status = "off"
 
+    # ── Akıllı Verimlilik Hesaplaması ──
+    max_weekly_hours = 48  # Bir makinenin haftalık maksimum çalışma saati
+    if status == "on" and calisma_saati > 0:
+        efficiency = min(100, round((calisma_saati / max_weekly_hours) * 100))
+    else:
+        efficiency = 0
+
+    # ── Ana Payload ──
     payload = {
         "id": config.AGENT_ID,
         "name": config.AGENT_NAME,
         "location": config.LOCATION,
         "status": status,
-        "hours_this_week": hours,
-        "total_hours": hours,
-        "efficiency": config.DEFAULT_EFFICIENCY,   # config'ten alıyoruz
-        "fault_code": fault_code,
-        "fault_message": FAULT_CODES.get(fault_code),
-        "temperature": round(get("Sıcaklık"), 1) if "Sıcaklık" in raw_data else None,
-        "rpm": int(get("Devir")) if "Devir" in raw_data else None,
+        "hours_this_week": calisma_saati,
+        "total_hours": calisma_saati,           # İleride toplamı ayrı tutabiliriz
+        "efficiency": efficiency,               # Dinamik hesaplandı
+        "fault_code": ariza_kodu,
+        "fault_message": FAULT_CODES.get(ariza_kodu),
+        
+        # Opsiyonel sensörler
+        "temperature": round(float(sicaklik), 1) if sicaklik is not None else None,
+        "rpm": int(devir) if devir is not None else None,
+        
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
