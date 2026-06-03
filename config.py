@@ -30,7 +30,7 @@ PLC_TIMEOUT = 5.0               # Bağlantı zaman aşımı (saniye)
 # PLC'nin FINS node numarası — genelde 0 veya PLC'nin son IP oktet'i
 # Örnek: 192.168.250.1 → node = 1
 PLC_FINS_NODE    = 1    # PLC node numarası
-CLIENT_FINS_NODE = 2    # Bu Orange Pi'nin node numarası (herhangi bir boş numara)
+CLIENT_FINS_NODE = 33    # Bu Orange Pi'nin node numarası (herhangi bir boş numara)
 
 
 # ═════════════════════════════════════════════
