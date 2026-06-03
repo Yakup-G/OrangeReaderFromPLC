@@ -168,6 +168,7 @@ class Agent:
                 timeout     = config.PLC_TIMEOUT,
                 fins_node   = config.PLC_FINS_NODE,
                 client_node = config.CLIENT_FINS_NODE,
+                protocol=config.PROTOCOL,
             ),
             reconnect_delay     = config.RECONNECT_DELAY_SEC,
             logger              = LOGGER,
