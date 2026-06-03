@@ -32,7 +32,8 @@ CLIENT_FINS_NODE = 33
 # 3. SUNUCU AYARLARI
 # ═════════════════════════════════════════════
 
-SERVER_URL     = "http://127.0.0.1:8080"   # Test için fake server
+# SERVER_URL     = "http://127.0.0.1:8080"   # Test için fake server
+SERVER_URL = "http://192.168.1.141:8080"
 # SERVER_URL   = "http://192.168.1.100:8080"  # Gerçek sunucu
 
 SERVER_API_KEY = "gizli-anahtar-buraya"
