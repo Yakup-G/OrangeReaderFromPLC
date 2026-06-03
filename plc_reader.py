@@ -1,8 +1,8 @@
 """
-plc_reader.py  —  FINS/TCP ile Omron PLC Okuyucu
-─────────────────────────────────────────────────
-fins kütüphanesi v1.0.5 — TCPFinsConnection kullanır.
-Bağlantı kopunca otomatik yeniden bağlanır.
+plc_reader.py  —  FINS/TCP ile Omron PLC Okuyucu (Client tabanlı)
+──────────────────────────────────────────────────────────────
+client.py'deki TCP okuma mantığı entegre edildi.
+Bool (bit) okuması için özel destek eklendi.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 from fins.tcp import TCPFinsConnection
+import fins.fins_common
 
 from config import PLCConfig, FinsTag
 
@@ -44,13 +45,7 @@ class PLCReader:
 
     def read(self, tags: List[FinsTag]) -> Dict[str, object]:
         """
-        Tag listesini PLC'den oku.
-        Döndürülen örnek:
-            {
-                "Çalışma Saati":  1240.0,
-                "Çalışma Durumu": 1.0,
-                "Arıza Kodu":     0.0,
-            }
+        Tag listesini PLC'den oku (client.py mantığı ile).
         """
         if not tags:
             return {}
@@ -65,27 +60,24 @@ class PLCReader:
 
                 for tag in tags:
                     try:
-                        raw = conn.read(
-                            memory_area      = tag.memory_area,
-                            word_address     = tag.address,
-                            data_type        = tag.data_type,
-                            number_of_values = 1,
-                        )
+                        success, result, message = self._read_single_tag(conn, tag)
 
-                        # fins 1.0.5 liste döndürür — ilk elemanı al
-                        raw_val = raw[0] if isinstance(raw, (list, tuple)) else raw
+                        if success:
+                            # Ölçekleme uygula
+                            scaled_value = round(float(result) * tag.scale, 4)
+                            values[tag.label] = scaled_value
 
-                        # bytes gelirse int'e çevir
-                        if isinstance(raw_val, (bytes, bytearray)):
-                            raw_val = int.from_bytes(raw_val, "big")
-
-                        values[tag.label] = round(float(raw_val) * tag.scale, 4)
-
-                        self._logger.debug(
-                            "OK  %s[%s%d] = %s %s",
-                            tag.label, tag.memory_area.upper(),
-                            tag.address, values[tag.label], tag.unit,
-                        )
+                            self._logger.debug(
+                                "OK  %s[%s%d] = %s %s",
+                                tag.label, tag.memory_area.upper(),
+                                tag.address, scaled_value, tag.unit,
+                            )
+                        else:
+                            self._logger.warning(
+                                "%s[%s%d] okunamadı: %s",
+                                tag.label, tag.memory_area.upper(), tag.address, message
+                            )
+                            values[tag.label] = None
 
                     except Exception as exc:
                         if self._is_conn_error(exc):
@@ -94,15 +86,17 @@ class PLCReader:
                                 tag.label, tag.memory_area.upper(), tag.address, exc,
                             )
                             self._reset()
-                            break  # while döngüsü yeniden dener
+                            break
                         else:
                             self._logger.warning(
-                                "%s[%s%d] okunamadı: %s — atlanıyor.",
-                                tag.label, tag.memory_area.upper(), tag.address, exc,
+                                "%s[%s%d] okunamadı: %s",
+                                tag.label, tag.memory_area.upper(), tag.address, exc
                             )
                             values[tag.label] = None
+
                 else:
-                    return values  # Tüm tag'ler başarıyla okundu
+                    # Tüm tag'ler okundu
+                    return values
 
             except Exception as exc:
                 self._logger.exception("Beklenmedik okuma hatası: %s", exc)
@@ -110,15 +104,82 @@ class PLCReader:
 
         raise RuntimeError("PLCReader durduruldu.")
 
+    def _read_single_tag(self, conn: TCPFinsConnection, tag: FinsTag) -> tuple[bool, any, str]:
+        """Tek bir tag'i client.py mantığı ile oku"""
+        try:
+            memory_area = tag.memory_area.lower()
+            address_str = str(tag.address)
+
+            # Bool (Bit) okuması için özel işlem
+            if tag.data_type.lower() == 'b':
+                return self._read_bit(conn, memory_area, address_str)
+
+            # Normal okuma (word, uint, int, float vb.)
+            result = conn.read(
+                memory_area=memory_area,
+                word_address=tag.address,
+                data_type=tag.data_type.lower(),
+                number_of_values=1,
+            )
+            raw_val = result[0] if isinstance(result, (list, tuple)) else result
+
+            if isinstance(raw_val, (bytes, bytearray)):
+                raw_val = int.from_bytes(raw_val, "big")
+
+            return True, raw_val, "success"
+
+        except Exception as e:
+            return False, None, str(e)
+
+    def _read_bit(self, conn: TCPFinsConnection, memory_area: str, address_str: str) -> tuple[bool, any, str]:
+        """Bit (Bool) okuması - client.py'deki özel mantık"""
+        try:
+            if "." in address_str:
+                parts = address_str.split(".")
+                word_address = int(parts[0])
+                bit_address = int(parts[1])
+            else:
+                word_address = int(address_str)
+                bit_address = 0
+
+            memory_areas = fins.fins_common.FinsPLCMemoryAreas()
+            ma = memory_area.lower()
+
+            if ma == 'w':
+                read_area = memory_areas.WORK_BIT
+            elif ma == 'c':
+                read_area = memory_areas.CIO_BIT
+            elif ma == 'd':
+                read_area = memory_areas.DATA_MEMORY_BIT
+            elif ma == 'h':
+                read_area = memory_areas.HOLDING_BIT
+            else:
+                read_area = memory_areas.DATA_MEMORY_BIT
+
+            begin_address = word_address.to_bytes(2, 'big') + bit_address.to_bytes(1, 'big')
+            response = conn.memory_area_read(read_area, begin_address, 1)
+
+            fins_response = fins.fins_common.FinsResponseFrame()
+            fins_response.from_bytes(response)
+
+            if not fins_response.end_code.startswith(b'\x00'):
+                return False, None, f"End Code: {fins_response.end_code}"
+
+            data = fins_response.text
+            return True, int.from_bytes(data, 'big'), "success"
+
+        except Exception as e:
+            return False, None, str(e)
+
     def test_connection(self) -> bool:
-        """Bağlantıyı test et — kurulum sırasında kullan."""
+        """Bağlantıyı test et"""
         try:
             conn = TCPFinsConnection()
-            conn.dest_node_add  = self._config.fins_node
-            conn.srce_node_add  = self._config.client_node
+            conn.dest_node_add = self._config.fins_node
+            conn.srce_node_add = self._config.client_node
             conn.connect(self._config.ip, port=self._config.port,
                          connection_timeout=self._config.timeout)
-            # D0 adresini oku — sadece bağlantı testi
+            # Basit test okuma
             conn.read("d", 0, "ui")
             conn.fins_socket.close()
             return True
@@ -127,7 +188,7 @@ class PLCReader:
             return False
 
     # ──────────────────────────────────────────
-    # Dahili metodlar
+    # Dahili metodlar (değişmedi)
     # ──────────────────────────────────────────
 
     def _ensure_connection(self) -> Optional[TCPFinsConnection]:
@@ -146,13 +207,13 @@ class PLCReader:
                 conn.srce_node_add = self._config.client_node
                 conn.connect(
                     self._config.ip,
-                    port               = self._config.port,
-                    connection_timeout = self._config.timeout,
+                    port=self._config.port,
+                    connection_timeout=self._config.timeout,
                 )
 
                 with self._lock:
-                    self._conn   = conn
-                    changed      = not self._online
+                    self._conn = conn
+                    changed = not self._online
                     self._online = True
 
                 if changed:
@@ -177,11 +238,11 @@ class PLCReader:
     def _close(self) -> None:
         notify = False
         with self._lock:
-            conn         = self._conn
-            self._conn   = None
+            conn = self._conn
+            self._conn = None
             if self._online:
                 self._online = False
-                notify       = True
+                notify = True
 
         if conn is not None:
             try:
