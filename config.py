@@ -2,153 +2,135 @@
 config.py  —  Orange Pi Agent Yapılandırması
 ─────────────────────────────────────────────────────────────
 Her Orange Pi'da SADECE bu dosyayı düzenliyorsun.
-Başka hiçbir dosyaya dokunmana gerek yok.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List
+from dataclasses import dataclass
+from typing import List, Union
 
 
 # ═════════════════════════════════════════════
 # 1. BU CIHAZIN KİMLİĞİ
 # ═════════════════════════════════════════════
 
-# Dashboard'da hangi makine olarak görünecek
 AGENT_ID = "CNC-01"
 
 
 # ═════════════════════════════════════════════
-# 2. PLC BAĞLANTI AYARLARI  (eth1 portu)
+# 2. PLC BAĞLANTI AYARLARI
 # ═════════════════════════════════════════════
 
-PLC_IP      = "192.168.250.1"   # Senin PLC'nin IP adresi
-PLC_PORT    = 9600              # Omron FINS/TCP varsayılan portu
-PLC_TIMEOUT = 5.0               # Bağlantı zaman aşımı (saniye)
+PLC_IP      = "192.168.250.1"   
+PLC_PORT    = 9600              
+PLC_TIMEOUT = 5.0               
 
-# Omron FINS Node adresleri
-# PLC'nin FINS node numarası — genelde 0 veya PLC'nin son IP oktet'i
-# Örnek: 192.168.250.1 → node = 1
-PLC_FINS_NODE    = 1    # PLC node numarası
-CLIENT_FINS_NODE = 33    # Bu Orange Pi'nin node numarası (herhangi bir boş numara)
+PLC_FINS_NODE    = 1      # PLC'nin FINS node numarası
+CLIENT_FINS_NODE = 33     # Orange Pi için (boş bir numara)
 
 
 # ═════════════════════════════════════════════
-# 3. SUNUCU AYARLARI  (eth0 portu)
+# 3. SUNUCU AYARLARI
 # ═════════════════════════════════════════════
 
-SERVER_URL     = "http://192.168.1.100:8080"  # Dashboard sunucusunun adresi
-SERVER_API_KEY = "gizli-anahtar-buraya"       # app.py'deki AGENT_API_KEY ile aynı olmalı
+SERVER_URL     = "http://192.168.1.100:8080"
+SERVER_API_KEY = "gizli-anahtar-buraya"       # Dashboard ile aynı olmalı
 
 
 # ═════════════════════════════════════════════
-# 4. ZAMANLAMA
+# 4. ZAMANLAMA ve LOG
 # ═════════════════════════════════════════════
 
-READ_INTERVAL_SEC   = 5    # Kaç saniyede bir PLC okunacak
-RECONNECT_DELAY_SEC = 5.0  # Bağlantı kopunca kaç saniye beklenecek
+READ_INTERVAL_SEC   = 5
+RECONNECT_DELAY_SEC = 5.0
 LOG_FILE            = "logs/agent.log"
 LOG_LEVEL           = "INFO"   # DEBUG, INFO, WARNING, ERROR
 
 
 # ═════════════════════════════════════════════
-# 5. FINS ADRES TANIMI
-#
-# memory_area → Omron bellek bölgesi:
-#   "d"  = Data Memory  (D0, D1, D100 ...)   ← En çok kullanılan
-#   "c"  = CIO / I-O    (C0, C1 ...)
-#   "h"  = Holding      (H0, H1 ...)
-#   "w"  = Work         (W0, W1 ...)
-#
-# address → Adres numarası (D100 → 100)
-#
-# data_type → Verinin tipi:
-#   "ui"  = Unsigned INT    0..65535        (sayaç, saat gibi)
-#   "i"   = Signed INT      -32768..32767
-#   "udi" = Unsigned DINT   0..4294967295   (büyük sayılar)
-#   "r"   = REAL            float           (sıcaklık, basınç)
-#   "w"   = WORD            ham hex
-#
-# scale → Ham değerle çarpılacak katsayı
-#   Örnek: PLC 245 gönderiyorsa ve gerçek değer 24.5°C ise → scale=0.1
-#
-# label → Dashboard'da görünecek isim
-# unit  → Birimi (gösterim için)
+# 5. FINS TAG TANIMLARI
 # ═════════════════════════════════════════════
 
 @dataclass
 class FinsTag:
-    label:       str           # Dashboard'da görünecek isim
-    memory_area: str           # "d", "c", "h", "w"
-    address:     int           # Adres numarası
-    data_type:   str = "ui"    # Veri tipi
-    scale:       float = 1.0   # Çarpan
-    unit:        str  = ""     # Birimi
+    label:        str                    # Gösterilecek isim
+    memory_area:  str                    # "d", "c", "w", "h"
+    address:      Union[int, str]        # Normal: int → Bit: "50.0" string
+    data_type:    str = "ui"             # "ui", "i", "w", "r", "b" (b = bool/bit)
+    scale:        float = 1.0            # Ölçek çarpanı
+    unit:         str = ""               # Birim
 
 
 # ─────────────────────────────────────────────
-# OKUMAK İSTEDİĞİN FINS ADRESLERİ
-#
-# PLC programcısından şunları sor:
-#   "Çalışma saatini hangi D adresinde tutuyorsun?"
-#   "Makine açık/kapalı bitini hangi adreste tutuyorsun?"
-#   "Arıza kodunu hangi adreste tutuyorsun?"
-#
-# Aşağıdaki adresleri kendi PLC'ne göre güncelle:
+# OKUMAK İSTEDİĞİN TAG'LER (PLC'ne göre düzenle)
 # ─────────────────────────────────────────────
 
 TAGS: List[FinsTag] = [
-    FinsTag(
-        label       = "Çalışma Saati",
-        memory_area = "d",       # Data Memory
-        address     = 100,       # D100
-        data_type   = "ui",      # 0..65535 saat
-        scale       = 1.0,
-        unit        = "hours",
-    ),
+    # ── Temel Durum Tag'leri ──
     FinsTag(
         label       = "Çalışma Durumu",
-        memory_area = "d",       # Data Memory
-        address     = 101,       # D101  →  0=kapalı, 1=çalışıyor
-        data_type   = "ui",
+        memory_area = "d",
+        address     = 101,           # Örnek: D101
+        data_type   = "ui",          # 0 = Kapalı, 1 = Çalışıyor
         scale       = 1.0,
-        unit        = "bool",
     ),
     FinsTag(
         label       = "Arıza Kodu",
-        memory_area = "d",       # Data Memory
-        address     = 200,       # D200  →  0=normal, >0=arıza
+        memory_area = "d",
+        address     = 200,
         data_type   = "ui",
         scale       = 1.0,
-        unit        = "code",
     ),
-    # ── Opsiyonel — ihtiyacın yoksa sil ──
+    FinsTag(
+        label       = "Çalışma Saati",
+        memory_area = "d",
+        address     = 100,
+        data_type   = "ui",
+        scale       = 1.0,           # Eğer 0.1 saatlik ise scale=0.1 yap
+        unit        = "hours",
+    ),
+
+    # ── Analog Değerler ──
     FinsTag(
         label       = "Sıcaklık",
         memory_area = "d",
-        address     = 300,       # D300  →  245 geliyorsa = 24.5°C
+        address     = 300,
         data_type   = "ui",
-        scale       = 0.1,       # PLC 10x büyük gönderiyorsa
+        scale       = 0.1,           # PLC 245 gönderiyorsa → 24.5°C
         unit        = "°C",
     ),
     FinsTag(
         label       = "Devir",
         memory_area = "d",
-        address     = 400,       # D400  →  RPM
+        address     = 400,
         data_type   = "ui",
         scale       = 1.0,
         unit        = "rpm",
     ),
+
+    # ── Bit (Bool) Okumaları - Önemli! ──
+    # Bit okumak için data_type="b" ve address="word.bit" şeklinde string yazılır
+    # Örnek:
+    # FinsTag(
+    #     label       = "Motor Çalışıyor",
+    #     memory_area = "c",           # veya "d", "w"
+    #     address     = "50.0",        # C50.00 bitini oku
+    #     data_type   = "b",
+    # ),
+    # FinsTag(
+    #     label       = "Emniyet Kilidi",
+    #     memory_area = "w",
+    #     address     = "100.5",       # W100.05
+    #     data_type   = "b",
+    # ),
 ]
 
 
 # ═════════════════════════════════════════════
 # 6. ARIZA KOD TABLOSU
-# PLC'nin hata kodlarını buraya ekle
 # ═════════════════════════════════════════════
 
 FAULT_CODES = {
-    0:   None,                 # Normal — alarm yok
+    0:   None,
     1:   "Aşırı ısınma",
     2:   "Aşırı yük",
     3:   "Acil durdurma aktif",
@@ -160,13 +142,13 @@ FAULT_CODES = {
 
 
 # ═════════════════════════════════════════════
-# 7. İÇ YAPILAR  (değiştirme)
+# 7. İÇ YAPILAR (değiştirme)
 # ═════════════════════════════════════════════
 
 @dataclass
 class PLCConfig:
-    ip:        str
-    port:      int   = 9600
-    timeout:   float = 5.0
-    fins_node: int   = 1
-    client_node: int = 2
+    ip:          str
+    port:        int = 9600
+    timeout:     float = 5.0
+    fins_node:   int = 1
+    client_node: int = 33
