@@ -1,7 +1,7 @@
 """
 main.py  —  Orange Pi Agent
 ────────────────────────────────────────────────────────────
-1. FINS/TCP ile PLC'den veri okur
+1. FINS/TCP ile PLC'den veri okur (yeni PLCReader)
 2. Dashboard sunucusuna HTTP ile gönderir
 3. Hata olsa bile çalışmaya devam eder
 4. Systemd servisi olarak otomatik başlar
@@ -66,31 +66,7 @@ LOGGER = setup_logger()
 def interpret_data(raw: dict) -> dict:
     """
     FINS'ten okunan ham değerleri dashboard formatına çevirir.
-
-    Giriş (raw) örneği:
-        {
-            "Çalışma Saati":   1240.0,
-            "Çalışma Durumu":  1.0,
-            "Arıza Kodu":      0.0,
-            "Sıcaklık":        24.5,
-            "Devir":           1450.0,
-        }
-
-    Çıkış örneği:
-        {
-            "id":              "CNC-01",
-            "status":          "on",
-            "hours_this_week": 1240.0,
-            "total_hours":     1240.0,
-            "efficiency":      80,
-            "fault_code":      0,
-            "fault_message":   null,
-            "temperature":     24.5,
-            "rpm":             1450,
-            "timestamp":       "2024-01-15T09:14:00+00:00"
-        }
     """
-
     def get(label: str, default=0.0):
         val = raw.get(label)
         return default if val is None else val
@@ -199,21 +175,15 @@ class Agent:
         )
 
     def run(self) -> None:
-        LOGGER.info("=" * 55)
-        LOGGER.info("  Orange Pi PLC Agent")
+        LOGGER.info("=" * 60)
+        LOGGER.info("  Orange Pi PLC Agent  [TCP FINS]")
         LOGGER.info("  Kimlik      : %s", config.AGENT_ID)
         LOGGER.info("  PLC         : %s:%s  (FINS node %s)",
                     config.PLC_IP, config.PLC_PORT, config.PLC_FINS_NODE)
         LOGGER.info("  Sunucu      : %s", config.SERVER_URL)
         LOGGER.info("  Okuma aralığı: %ss", config.READ_INTERVAL_SEC)
-        LOGGER.info("  Takip edilen adresler:")
-        for tag in TAGS:
-            LOGGER.info("    %-20s → %s%d  (%s)",
-                        tag.label,
-                        tag.memory_area.upper(),
-                        tag.address,
-                        tag.data_type)
-        LOGGER.info("=" * 55)
+        LOGGER.info("  Takip edilen tag sayısı: %d", len(TAGS))
+        LOGGER.info("=" * 60)
 
         fail_count = 0
 
@@ -221,45 +191,47 @@ class Agent:
             t0 = time.monotonic()
 
             try:
-                # ① PLC'den oku
+                # ① PLC'den oku (yeni PLCReader)
                 raw = self._reader.read(TAGS)
 
                 # ② Yorumla
                 data = interpret_data(raw)
 
                 # ③ Logla
-                extras = ""
+                extras = []
                 if "temperature" in data:
-                    extras += f"  sıcaklık={data['temperature']}°C"
+                    extras.append(f"sıcaklık={data['temperature']}°C")
                 if "rpm" in data:
-                    extras += f"  devir={data['rpm']}rpm"
+                    extras.append(f"devir={data['rpm']}rpm")
 
                 LOGGER.info(
-                    "%-10s  durum=%-4s  saat=%-7.1f  verim=%%%d%s",
+                    "%-10s  durum=%-4s  saat=%-7.1f  verim=%%%d  %s",
                     data["id"], data["status"],
                     data["hours_this_week"], data["efficiency"],
-                    extras,
+                    " | ".join(extras)
                 )
 
                 if data.get("fault_message"):
-                    LOGGER.warning("⚠ ARIZA: %s — %s", data["id"], data["fault_message"])
+                    LOGGER.warning("⚠ ARIZA: %s", data["fault_message"])
 
                 # ④ Sunucuya gönder
                 ok = send_to_server(data)
                 fail_count = 0 if ok else fail_count + 1
 
-                if fail_count == 5:
-                    LOGGER.error("Sunucuya art arda 5 kez gönderilemedi! Ağ bağlantısını kontrol et.")
+                if fail_count >= 5:
+                    LOGGER.error("Sunucuya art arda 5 kez gönderilemedi! Ağ bağlantısını kontrol edin.")
 
             except RuntimeError as exc:
                 LOGGER.info("Döngü durdu: %s", exc)
                 break
             except Exception as exc:
                 LOGGER.exception("Beklenmedik hata: %s", exc)
+                fail_count += 1
 
             # Bir sonraki okuma için bekle
             elapsed = time.monotonic() - t0
-            self._stop.wait(max(0.0, config.READ_INTERVAL_SEC - elapsed))
+            sleep_time = max(0.0, config.READ_INTERVAL_SEC - elapsed)
+            self._stop.wait(sleep_time)
 
         LOGGER.info("Agent kapatılıyor...")
         self._reader.stop()
@@ -267,11 +239,12 @@ class Agent:
 
     def stop(self) -> None:
         self._stop.set()
-        self._reader.stop()
+        if hasattr(self, '_reader'):
+            self._reader.stop()
 
 
 # ──────────────────────────────────────────────
-# Test modu — PLC olmadan bağlantıyı kontrol et
+# Test modu
 # ──────────────────────────────────────────────
 
 def run_test():
@@ -296,25 +269,24 @@ def run_test():
         LOGGER.info("Tag okuma deneniyor...")
         try:
             raw = reader.read(TAGS)
-            LOGGER.info("Okunan değerler:")
+            LOGGER.info("Okunan değerler (%d tag):", len(raw))
             for label, value in raw.items():
                 unit = next((t.unit for t in TAGS if t.label == label), "")
-                LOGGER.info("  %-20s = %s %s", label, value, unit)
+                LOGGER.info("  %-22s = %s %s", label, value, unit)
         except Exception as exc:
             LOGGER.error("Tag okuma hatası: %s", exc)
     else:
         LOGGER.error("✖ PLC'ye bağlanılamadı!")
-        LOGGER.error("  Kontrol et:")
-        LOGGER.error("  1. PLC açık ve ağa bağlı mı?")
-        LOGGER.error("  2. IP doğru mu? (%s)", config.PLC_IP)
-        LOGGER.error("  3. Orange Pi eth1 portu doğru ağda mı?")
-        LOGGER.error("  4. FINS node numarası doğru mu? (%s)", config.PLC_FINS_NODE)
+        LOGGER.error("Kontrol edilecek noktalar:")
+        LOGGER.error("  • PLC açık ve ağa bağlı mı?")
+        LOGGER.error("  • IP adresi doğru mu? → %s", config.PLC_IP)
+        LOGGER.error("  • FINS Node numarası doğru mu? → %s", config.PLC_FINS_NODE)
 
     reader.stop()
 
 
 # ──────────────────────────────────────────────
-# Başlangıç noktası
+# Başlangıç
 # ──────────────────────────────────────────────
 
 def main():
@@ -328,13 +300,18 @@ def main():
 
     agent = Agent()
 
-    def _signal(signum, frame):
-        LOGGER.info("Sinyal %s — kapatılıyor...", signum)
+    def _signal_handler(signum, frame):
+        LOGGER.info("Sinyal alındı (%s) — kapatılıyor...", signum)
         agent.stop()
 
-    signal.signal(signal.SIGTERM, _signal)
-    signal.signal(signal.SIGINT,  _signal)
-    agent.run()
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT,  _signal_handler)
+
+    try:
+        agent.run()
+    except KeyboardInterrupt:
+        LOGGER.info("Kullanıcı tarafından durduruldu.")
+        agent.stop()
 
 
 if __name__ == "__main__":
