@@ -1,21 +1,21 @@
 """
 main.py  —  Orange Pi Agent
 ────────────────────────────────────────────────────────────
-Görev:
-  1. PLC'den tag değerlerini oku  (plc_reader.py kullanarak)
-  2. Ham veriyi anlamlı duruma dönüştür
-  3. Dashboard sunucusuna HTTP ile gönder
-  4. Her şeyi logla, hata olsa bile çalışmaya devam et
+1. FINS/TCP ile PLC'den veri okur
+2. Dashboard sunucusuna HTTP ile gönderir
+3. Hata olsa bile çalışmaya devam eder
+4. Systemd servisi olarak otomatik başlar
 
 Çalıştırma:
     python main.py
 
-Servis olarak otomatik başlatmak için:
-    sudo systemctl enable plc-agent  (kurulum scripti bunu yapar)
+Test modu (PLC olmadan):
+    python main.py --test
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import signal
@@ -29,82 +29,78 @@ import requests
 
 import config
 from plc_reader import PLCReader
-from config import PLCConfig, TagDefinition, TAGS, FAULT_CODES
+from config import PLCConfig, TAGS, FAULT_CODES
 
 
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 # Loglama
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger("plc_agent")
     logger.setLevel(getattr(logging, config.LOG_LEVEL, logging.INFO))
-
     fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s",
+        "%(asctime)s [%(levelname)-7s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
-    # Konsola yaz
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
-
-    # Dosyaya yaz
     try:
+        import os
+        os.makedirs("logs", exist_ok=True)
         fh = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except Exception as e:
         logger.warning("Log dosyası açılamadı: %s", e)
-
     return logger
-
 
 LOGGER = setup_logger()
 
 
-# ─────────────────────────────────────────────
-# Ham PLC verisini dashboard formatına çevir
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Ham FINS verisini dashboard formatına çevir
+# ──────────────────────────────────────────────
 
 def interpret_data(raw: dict) -> dict:
     """
-    PLC'den okunan ham tag değerlerini
-    dashboard'un beklediği formata dönüştürür.
+    FINS'ten okunan ham değerleri dashboard formatına çevirir.
 
-    raw örneği:
-        {"D100": 1240, "M0": 1, "D200": 0, "D300": 245, "D400": 1450}
-
-    döndürülen örnek:
+    Giriş (raw) örneği:
         {
-            "id": "CNC-01",
-            "status": "on",
-            "hours_this_week": 38.5,
-            "total_hours": 1240,
-            "efficiency": 80,
-            "temperature": 24.5,
-            "rpm": 1450,
-            "fault_code": 0,
-            "fault_message": null,
-            "timestamp": "2024-01-15T09:14:00+00:00"
+            "Çalışma Saati":   1240.0,
+            "Çalışma Durumu":  1.0,
+            "Arıza Kodu":      0.0,
+            "Sıcaklık":        24.5,
+            "Devir":           1450.0,
+        }
+
+    Çıkış örneği:
+        {
+            "id":              "CNC-01",
+            "status":          "on",
+            "hours_this_week": 1240.0,
+            "total_hours":     1240.0,
+            "efficiency":      80,
+            "fault_code":      0,
+            "fault_message":   null,
+            "temperature":     24.5,
+            "rpm":             1450,
+            "timestamp":       "2024-01-15T09:14:00+00:00"
         }
     """
 
-    # Tag değerlerini label'a göre bul (ölçek uygula)
-    def get(label: str, default=0):
-        for tag in TAGS:
-            if tag.label == label and tag.name in raw:
-                try:
-                    return raw[tag.name] * tag.scale
-                except Exception:
-                    return default
-        return default
+    def get(label: str, default=0.0):
+        val = raw.get(label)
+        return default if val is None else val
 
-    # Çalışma durumu belirle
-    running    = bool(get("Çalışma Durumu", 0))
-    fault_code = int(get("Arıza Kodu", 0))
+    # Temel değerler
+    running     = bool(int(get("Çalışma Durumu", 0)))
+    fault_code  = int(get("Arıza Kodu", 0))
+    total_hours = round(get("Çalışma Saati", 0.0), 1)
 
+    # Durum belirle
     if fault_code != 0:
         status = "err"
     elif not running:
@@ -112,38 +108,28 @@ def interpret_data(raw: dict) -> dict:
     else:
         status = "on"
 
-    # Arıza mesajı
     fault_message = FAULT_CODES.get(fault_code)
 
-    # Çalışma saatleri
-    total_hours      = round(get("Çalışma Saati", 0), 1)
-    hours_this_week  = round(total_hours % config.TAGS[0].scale * 48, 1) if total_hours else 0.0
-
-    # PLC toplam saat veriyorsa doğrudan kullan,
-    # haftalık saati harici hesaplanıyorsa sunucu tarafı halleder.
-    # Şimdilik toplam saati gönder, sunucu haftalık hesaplar.
-    hours_this_week = total_hours  # Sunucu kümülatif farkı hesaplar
-
-    # Verimlilik: çalışıyorsa saate göre, değilse 0
-    max_weekly  = 48  # Haftalık maksimum saat — config'e de taşınabilir
-    efficiency  = min(100, round((hours_this_week / max_weekly) * 100)) if running else 0
+    # Verimlilik hesabı
+    max_weekly = 48
+    efficiency = min(100, round((total_hours / max_weekly) * 100)) if running and total_hours > 0 else 0
 
     result = {
-        "id":             config.AGENT_ID,
-        "status":         status,
-        "hours_this_week": hours_this_week,
-        "total_hours":    total_hours,
-        "efficiency":     efficiency,
-        "fault_code":     fault_code,
-        "fault_message":  fault_message,
-        "timestamp":      datetime.now(timezone.utc).isoformat(),
-        "raw_tags":       raw,   # Hata ayıklama için ham veriyi de gönder
+        "id":               config.AGENT_ID,
+        "name":             config.AGENT_ID,
+        "status":           status,
+        "hours_this_week":  total_hours,
+        "total_hours":      total_hours,
+        "efficiency":       efficiency,
+        "fault_code":       fault_code,
+        "fault_message":    fault_message,
+        "timestamp":        datetime.now(timezone.utc).isoformat(),
     }
 
-    # Opsiyonel alanlar — tag varsa ekle
+    # Opsiyonel alanlar
     temp = get("Sıcaklık", None)
     if temp is not None:
-        result["temperature"] = round(temp, 1)
+        result["temperature"] = round(float(temp), 1)
 
     rpm = get("Devir", None)
     if rpm is not None:
@@ -152,150 +138,128 @@ def interpret_data(raw: dict) -> dict:
     return result
 
 
-# ─────────────────────────────────────────────
-# Sunucuya veri gönder
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Sunucuya gönder
+# ──────────────────────────────────────────────
 
 def send_to_server(data: dict) -> bool:
-    """
-    Veriyi dashboard sunucusuna gönder.
-    Başarılıysa True, değilse False döndürür.
-    """
     url = f"{config.SERVER_URL}/api/agent/update"
     headers = {
-        "Content-Type":  "application/json",
-        "X-Agent-ID":    config.AGENT_ID,
-        "X-API-Key":     config.SERVER_API_KEY,
+        "Content-Type": "application/json",
+        "X-Agent-ID":   config.AGENT_ID,
+        "X-API-Key":    config.SERVER_API_KEY,
     }
-
     try:
-        resp = requests.post(
-            url,
-            json=data,
-            headers=headers,
-            timeout=10,
-        )
+        resp = requests.post(url, json=data, headers=headers, timeout=10)
         if resp.status_code == 200:
-            LOGGER.debug("Sunucuya gönderildi: %s", config.AGENT_ID)
+            LOGGER.debug("✓ Sunucuya gönderildi")
             return True
-        else:
-            LOGGER.warning(
-                "Sunucu hata döndürdü: HTTP %s — %s",
-                resp.status_code,
-                resp.text[:200],
-            )
-            return False
-
-    except requests.exceptions.ConnectionError:
-        LOGGER.warning("Sunucuya bağlanılamadı: %s", config.SERVER_URL)
+        LOGGER.warning("Sunucu HTTP %s: %s", resp.status_code, resp.text[:200])
         return False
+    except requests.exceptions.ConnectionError:
+        LOGGER.warning("Sunucuya ulaşılamadı: %s", config.SERVER_URL)
     except requests.exceptions.Timeout:
         LOGGER.warning("Sunucu zaman aşımı")
-        return False
     except Exception as exc:
         LOGGER.error("Gönderme hatası: %s", exc)
-        return False
+    return False
 
 
-# ─────────────────────────────────────────────
-# Bağlantı durum değişikliği bildirimi
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Bağlantı değişikliği bildirimi
+# ──────────────────────────────────────────────
 
 def on_connection_change(is_connected: bool, at: datetime) -> None:
     if is_connected:
-        LOGGER.info("✓ PLC bağlantısı kuruldu (%s)", config.PLC_IP)
-        send_to_server({
-            "id":        config.AGENT_ID,
-            "status":    "on",
-            "event":     "connected",
-            "timestamp": at.isoformat(),
-        })
+        LOGGER.info("✓ PLC bağlandı: %s", config.PLC_IP)
+        send_to_server({"id": config.AGENT_ID, "status": "on",  "event": "connected",    "timestamp": at.isoformat()})
     else:
-        LOGGER.warning("✖ PLC bağlantısı kesildi (%s)", config.PLC_IP)
-        send_to_server({
-            "id":        config.AGENT_ID,
-            "status":    "off",
-            "event":     "disconnected",
-            "timestamp": at.isoformat(),
-        })
+        LOGGER.warning("✖ PLC bağlantısı kesildi: %s", config.PLC_IP)
+        send_to_server({"id": config.AGENT_ID, "status": "off", "event": "disconnected", "timestamp": at.isoformat()})
 
 
-# ─────────────────────────────────────────────
-# Ana döngü
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Ana Agent sınıfı
+# ──────────────────────────────────────────────
 
 class Agent:
     def __init__(self) -> None:
         self._stop = threading.Event()
-
-        plc_config = PLCConfig(
-            ip      = config.PLC_IP,
-            port    = config.PLC_PORT,
-            timeout = config.PLC_TIMEOUT,
-        )
-
         self._reader = PLCReader(
-            config              = plc_config,
+            config              = PLCConfig(
+                ip          = config.PLC_IP,
+                port        = config.PLC_PORT,
+                timeout     = config.PLC_TIMEOUT,
+                fins_node   = config.PLC_FINS_NODE,
+                client_node = config.CLIENT_FINS_NODE,
+            ),
             reconnect_delay     = config.RECONNECT_DELAY_SEC,
             logger              = LOGGER,
             connection_listener = on_connection_change,
         )
 
     def run(self) -> None:
-        LOGGER.info("=" * 50)
-        LOGGER.info("  Orange Pi Agent başlatıldı")
-        LOGGER.info("  Kimlik    : %s", config.AGENT_ID)
-        LOGGER.info("  PLC       : %s:%s", config.PLC_IP, config.PLC_PORT)
-        LOGGER.info("  Sunucu    : %s", config.SERVER_URL)
+        LOGGER.info("=" * 55)
+        LOGGER.info("  Orange Pi PLC Agent")
+        LOGGER.info("  Kimlik      : %s", config.AGENT_ID)
+        LOGGER.info("  PLC         : %s:%s  (FINS node %s)",
+                    config.PLC_IP, config.PLC_PORT, config.PLC_FINS_NODE)
+        LOGGER.info("  Sunucu      : %s", config.SERVER_URL)
         LOGGER.info("  Okuma aralığı: %ss", config.READ_INTERVAL_SEC)
-        LOGGER.info("=" * 50)
+        LOGGER.info("  Takip edilen adresler:")
+        for tag in TAGS:
+            LOGGER.info("    %-20s → %s%d  (%s)",
+                        tag.label,
+                        tag.memory_area.upper(),
+                        tag.address,
+                        tag.data_type)
+        LOGGER.info("=" * 55)
 
-        consecutive_failures = 0
+        fail_count = 0
 
         while not self._stop.is_set():
-            start = time.monotonic()
+            t0 = time.monotonic()
 
             try:
                 # ① PLC'den oku
-                LOGGER.debug("Tag'ler okunuyor...")
                 raw = self._reader.read(TAGS)
-                LOGGER.debug("Ham veri: %s", raw)
 
                 # ② Yorumla
                 data = interpret_data(raw)
+
+                # ③ Logla
+                extras = ""
+                if "temperature" in data:
+                    extras += f"  sıcaklık={data['temperature']}°C"
+                if "rpm" in data:
+                    extras += f"  devir={data['rpm']}rpm"
+
                 LOGGER.info(
-                    "%-10s │ durum=%-4s │ saat=%-6s │ verim=%%%s %s",
-                    data["id"],
-                    data["status"],
-                    data["hours_this_week"],
-                    data["efficiency"],
-                    f"│ sıcaklık={data['temperature']}°C" if "temperature" in data else "",
+                    "%-10s  durum=%-4s  saat=%-7.1f  verim=%%%d%s",
+                    data["id"], data["status"],
+                    data["hours_this_week"], data["efficiency"],
+                    extras,
                 )
 
-                # ③ Sunucuya gönder
+                if data.get("fault_message"):
+                    LOGGER.warning("⚠ ARIZA: %s — %s", data["id"], data["fault_message"])
+
+                # ④ Sunucuya gönder
                 ok = send_to_server(data)
-                if ok:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 5:
-                        LOGGER.error(
-                            "Sunucuya art arda %d kez gönderilemedi. "
-                            "Ağ bağlantısını kontrol et.",
-                            consecutive_failures,
-                        )
+                fail_count = 0 if ok else fail_count + 1
+
+                if fail_count == 5:
+                    LOGGER.error("Sunucuya art arda 5 kez gönderilemedi! Ağ bağlantısını kontrol et.")
 
             except RuntimeError as exc:
-                # PLCReader.stop() çağrıldıktan sonra oluşur
-                LOGGER.info("Agent durdu: %s", exc)
+                LOGGER.info("Döngü durdu: %s", exc)
                 break
             except Exception as exc:
                 LOGGER.exception("Beklenmedik hata: %s", exc)
 
-            # Bir sonraki okumaya kadar bekle
-            elapsed = time.monotonic() - start
-            wait    = max(0.0, config.READ_INTERVAL_SEC - elapsed)
-            self._stop.wait(wait)
+            # Bir sonraki okuma için bekle
+            elapsed = time.monotonic() - t0
+            self._stop.wait(max(0.0, config.READ_INTERVAL_SEC - elapsed))
 
         LOGGER.info("Agent kapatılıyor...")
         self._reader.stop()
@@ -306,20 +270,70 @@ class Agent:
         self._reader.stop()
 
 
-# ─────────────────────────────────────────────
-# Başlatma + sinyal yakalama (Ctrl+C / systemd)
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Test modu — PLC olmadan bağlantıyı kontrol et
+# ──────────────────────────────────────────────
 
-def main() -> None:
+def run_test():
+    LOGGER.info("TEST MODU — PLC bağlantısı test ediliyor...")
+    LOGGER.info("PLC: %s:%s  FINS node: %s", config.PLC_IP, config.PLC_PORT, config.PLC_FINS_NODE)
+
+    reader = PLCReader(
+        config = PLCConfig(
+            ip          = config.PLC_IP,
+            port        = config.PLC_PORT,
+            timeout     = config.PLC_TIMEOUT,
+            fins_node   = config.PLC_FINS_NODE,
+            client_node = config.CLIENT_FINS_NODE,
+        ),
+        reconnect_delay = 2.0,
+        logger          = LOGGER,
+    )
+
+    ok = reader.test_connection()
+    if ok:
+        LOGGER.info("✓ PLC bağlantısı başarılı!")
+        LOGGER.info("Tag okuma deneniyor...")
+        try:
+            raw = reader.read(TAGS)
+            LOGGER.info("Okunan değerler:")
+            for label, value in raw.items():
+                unit = next((t.unit for t in TAGS if t.label == label), "")
+                LOGGER.info("  %-20s = %s %s", label, value, unit)
+        except Exception as exc:
+            LOGGER.error("Tag okuma hatası: %s", exc)
+    else:
+        LOGGER.error("✖ PLC'ye bağlanılamadı!")
+        LOGGER.error("  Kontrol et:")
+        LOGGER.error("  1. PLC açık ve ağa bağlı mı?")
+        LOGGER.error("  2. IP doğru mu? (%s)", config.PLC_IP)
+        LOGGER.error("  3. Orange Pi eth1 portu doğru ağda mı?")
+        LOGGER.error("  4. FINS node numarası doğru mu? (%s)", config.PLC_FINS_NODE)
+
+    reader.stop()
+
+
+# ──────────────────────────────────────────────
+# Başlangıç noktası
+# ──────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Orange Pi PLC Agent")
+    parser.add_argument("--test", action="store_true", help="PLC bağlantısını test et ve çık")
+    args = parser.parse_args()
+
+    if args.test:
+        run_test()
+        return
+
     agent = Agent()
 
-    def _handle_signal(signum, frame):
-        LOGGER.info("Sinyal %s alındı, kapatılıyor...", signum)
+    def _signal(signum, frame):
+        LOGGER.info("Sinyal %s — kapatılıyor...", signum)
         agent.stop()
 
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT,  _handle_signal)
-
+    signal.signal(signal.SIGTERM, _signal)
+    signal.signal(signal.SIGINT,  _signal)
     agent.run()
 
 

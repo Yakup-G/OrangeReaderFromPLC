@@ -65,7 +65,7 @@ sudo -u "$SERVICE_USER" python3 -m venv "$INSTALL_DIR/venv"
 info "Python kütüphaneleri kuruluyor..."
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/venv/bin/pip" install \
-    aphyt \
+    fins \
     requests \
     -q
 
