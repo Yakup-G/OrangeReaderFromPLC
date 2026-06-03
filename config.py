@@ -23,7 +23,7 @@ AGENT_ID = "CNC-01"
 # ═════════════════════════════════════════════
 
 PLC_IP      = "192.168.250.1"   # Senin PLC'nin IP adresi
-PLC_PORT    = 9600              # Omron FINS/TCP varsayılan portu
+PLC_PORT    = 44818              # Omron FINS/TCP varsayılan portu
 PLC_TIMEOUT = 5.0               # Bağlantı zaman aşımı (saniye)
 
 # Omron FINS Node adresleri
