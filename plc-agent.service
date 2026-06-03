@@ -1,0 +1,21 @@
+[Unit]
+Description=PLC Agent — Orange Pi Veri Toplayıcı
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangepi
+WorkingDirectory=/home/orangepi/plc-agent
+ExecStart=/home/orangepi/plc-agent/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Çökmede otomatik yeniden başlat
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
