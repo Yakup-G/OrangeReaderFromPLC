@@ -1,13 +1,11 @@
 """
-plc_reader.py  —  FINS/TCP ve FINS/UDP ile Omron PLC Okuyucu
+plc_reader.py  —  Omron FINS PLC Okuyucu (Temiz ve Stabil Versiyon)
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import sys
-import os
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple, Any
 
@@ -21,46 +19,47 @@ LOGGER = logging.getLogger(__name__)
 
 
 class OmronFinsClient:
-    """client.py'deki mantık buraya taşındı"""
+    """PLC ile iletişim kuran yardımcı sınıf"""
+
     def __init__(self):
-        self.client: Optional[Any] = None
-        self.ip_address = ""
-        self.port = 9600
+        self.client = None
         self.connected = False
         self.protocol = "UDP"
 
-    def connect(self, ip_address: str, port: int = 9600, dest_node: int = 0, 
-                src_node: int = 0, protocol: str = "UDP") -> Tuple[bool, str]:
+    def connect(self, ip: str, port: int = 9600, dest_node: int = 1,
+                src_node: int = 33, protocol: str = "UDP") -> Tuple[bool, str]:
         try:
             self.protocol = protocol.upper()
-            
+
             if self.protocol == "TCP":
                 self.client = TCPFinsConnection()
-                self.client.connect(ip_address, port=port, connection_timeout=3.0)
+                self.client.connect(ip, port=port, connection_timeout=3.0)
             else:
                 self.client = UDPFinsConnection()
-                self.client.connect(ip_address, port=port)
+                self.client.connect(ip, port=port)
 
+            # Timeout ayarı
             if hasattr(self.client, 'fins_socket'):
                 self.client.fins_socket.settimeout(3.0)
 
-            if dest_node != 0:
+            # Node ayarları
+            if dest_node:
                 self.client.dest_node_add = dest_node
-            if src_node != 0:
+            if src_node:
                 self.client.srce_node_add = src_node
 
+            # UDP için ekstra doğrulama
             if self.protocol == "UDP":
-                self.client.cpu_unit_status_read()  # UDP için doğrulama
+                self.client.cpu_unit_status_read()
 
-            self.ip_address = ip_address
-            self.port = port
             self.connected = True
-            LOGGER.info(f"Connected to {ip_address}:{port} over {protocol}")
+            LOGGER.info(f"✓ PLC bağlantısı kuruldu ({self.protocol}) - {ip}:{port}")
             return True, "Connected successfully"
+
         except Exception as e:
             self.connected = False
-            error_msg = f"Connection failed: {str(e)}"
-            LOGGER.error(error_msg)
+            error_msg = str(e)
+            LOGGER.error(f"PLC bağlantı hatası: {error_msg}")
             return False, error_msg
 
     def disconnect(self):
@@ -73,30 +72,35 @@ class OmronFinsClient:
             self.client = None
         self.connected = False
 
-    def read_variable(self, memory_area: str, address_str: str, data_type: str = 'w') -> Tuple[bool, Any, str]:
+    def read_variable(self, memory_area: str, address_str: str, data_type: str = 'ui') -> Tuple[bool, Any, str]:
+        """Tek bir tag okur"""
         if not self.connected or not self.client:
             return False, None, "Not connected"
+
         try:
-            # Bit okuması (Bool)
+            # Bool / Bit okuma
             if data_type.lower() == 'b':
                 return self._read_bit(memory_area, address_str)
 
-            # Normal okuma
+            # Normal okuma (word, uint, int, etc.)
             result = self.client.read(
                 memory_area=memory_area.lower(),
                 word_address=int(address_str),
                 data_type=data_type.lower(),
                 number_of_values=1
             )
-            raw_val = result[0] if isinstance(result, (list, tuple)) else result
-            if isinstance(raw_val, (bytes, bytearray)):
-                raw_val = int.from_bytes(raw_val, "big")
-            return True, raw_val, "success"
+
+            value = result[0] if isinstance(result, (list, tuple)) else result
+            if isinstance(value, (bytes, bytearray)):
+                value = int.from_bytes(value, "big")
+
+            return True, value, "success"
 
         except Exception as e:
             return False, None, str(e)
 
     def _read_bit(self, memory_area: str, address_str: str) -> Tuple[bool, Any, str]:
+        """Bit (Bool) okuması"""
         try:
             if "." in address_str:
                 word, bit = map(int, address_str.split("."))
@@ -105,11 +109,15 @@ class OmronFinsClient:
 
             memory_areas = fins.fins_common.FinsPLCMemoryAreas()
             ma = memory_area.lower()
-            if ma == 'w': read_area = memory_areas.WORK_BIT
-            elif ma == 'c': read_area = memory_areas.CIO_BIT
-            elif ma == 'd': read_area = memory_areas.DATA_MEMORY_BIT
-            elif ma == 'h': read_area = memory_areas.HOLDING_BIT
-            else: read_area = memory_areas.DATA_MEMORY_BIT
+
+            if ma == 'c':
+                read_area = memory_areas.CIO_BIT
+            elif ma == 'w':
+                read_area = memory_areas.WORK_BIT
+            elif ma == 'h':
+                read_area = memory_areas.HOLDING_BIT
+            else:
+                read_area = memory_areas.DATA_MEMORY_BIT
 
             begin_address = word.to_bytes(2, 'big') + bit.to_bytes(1, 'big')
             response = self.client.memory_area_read(read_area, begin_address, 1)
@@ -127,32 +135,32 @@ class OmronFinsClient:
 
 
 # ─────────────────────────────────────────────
-# PLCReader Sınıfı
+# ANA SINIF
 # ─────────────────────────────────────────────
 
 class PLCReader:
-
     def __init__(
         self,
-        config:              PLCConfig,
-        reconnect_delay:     float = 5.0,
-        logger:              Optional[logging.Logger] = None,
+        config: PLCConfig,
+        reconnect_delay: float = 5.0,
+        logger: Optional[logging.Logger] = None,
         connection_listener: Optional[Callable[[bool, datetime], None]] = None,
-    ) -> None:
-        self._config              = config
-        self._reconnect_delay     = max(0.5, reconnect_delay)
-        self._logger              = logger or LOGGER
-        self._lock                = threading.Lock()
-        self._client:             Optional[OmronFinsClient] = None
-        self._stop                = threading.Event()
+    ):
+        self._config = config
+        self._reconnect_delay = max(0.5, reconnect_delay)
+        self._logger = logger or LOGGER
+        self._lock = threading.Lock()
+        self._client: Optional[OmronFinsClient] = None
+        self._stop = threading.Event()
+        self._online = False
         self._connection_listener = connection_listener
-        self._online              = False
 
-    def stop(self) -> None:
+    def stop(self):
         self._stop.set()
         self._close()
 
     def read(self, tags: List[FinsTag]) -> Dict[str, object]:
+        """PLC'den tag listesini okur"""
         if not tags:
             return {}
 
@@ -161,39 +169,33 @@ class PLCReader:
             if client is None:
                 break
 
-            try:
-                values: Dict[str, object] = {}
-                for tag in tags:
-                    try:
-                        success, result, msg = client.read_variable(
-                            memory_area=tag.memory_area,
-                            address_str=str(tag.address),
-                            data_type=tag.data_type
-                        )
-                        if success:
-                            scaled = round(float(result) * tag.scale, 4)
-                            values[tag.label] = scaled
-                            self._logger.debug("OK  %s = %s", tag.label, scaled)
-                        else:
-                            self._logger.warning("%s okunamadı: %s", tag.label, msg)
-                            values[tag.label] = None
-                    except Exception as exc:
-                        if self._is_conn_error(exc):
-                            self._reset()
-                            break
+            values: Dict[str, object] = {}
+            for tag in tags:
+                try:
+                    success, result, message = client.read_variable(
+                        memory_area=tag.memory_area,
+                        address_str=str(tag.address),
+                        data_type=tag.data_type
+                    )
+                    if success:
+                        scaled_value = round(float(result) * tag.scale, 4)
+                        values[tag.label] = scaled_value
+                    else:
                         values[tag.label] = None
-                else:
-                    return values
-            except Exception as exc:
-                self._logger.exception("Okuma hatası")
-                self._reset()
+                        self._logger.warning(f"{tag.label} okunamadı: {message}")
+                except Exception as e:
+                    values[tag.label] = None
+                    self._logger.warning(f"{tag.label} okuma hatası: {e}")
+
+            return values  # Başarılı okuma
 
         raise RuntimeError("PLCReader durduruldu.")
 
     def test_connection(self) -> bool:
+        """Bağlantı testi"""
         test_client = OmronFinsClient()
         success, _ = test_client.connect(
-            ip_address=self._config.ip,
+            ip=self._config.ip,
             port=self._config.port,
             dest_node=self._config.fins_node,
             src_node=self._config.client_node,
@@ -210,32 +212,29 @@ class PLCReader:
 
         while not self._stop.is_set():
             try:
-                self._logger.info("PLC'ye bağlanılıyor... (%s)", self._config.protocol)
                 new_client = OmronFinsClient()
                 success, msg = new_client.connect(
-                    ip_address=self._config.ip,
+                    ip=self._config.ip,
                     port=self._config.port,
                     dest_node=self._config.fins_node,
                     src_node=self._config.client_node,
                     protocol=self._config.protocol
                 )
+
                 if success:
                     with self._lock:
                         self._client = new_client
                         if not self._online:
                             self._online = True
                             self._notify(True)
-                    self._logger.info("✓ Bağlantı kuruldu (%s)", self._config.protocol)
                     return new_client
-            except Exception as exc:
-                self._logger.error("Bağlantı hatası: %s", exc)
+
+            except Exception as e:
+                self._logger.error(f"Bağlantı hatası: {e}")
 
             self._stop.wait(self._reconnect_delay)
-        return None
 
-    def _reset(self):
-        self._close()
-        self._stop.wait(self._reconnect_delay)
+        return None
 
     def _close(self):
         notify = False
@@ -248,16 +247,16 @@ class PLCReader:
 
         if client:
             client.disconnect()
-        if notify:
-            self._notify(False)
 
-    def _is_conn_error(self, exc: Exception) -> bool:
-        msg = str(exc).lower()
-        return any(k in msg for k in ("timeout", "connection", "refused", "reset", "network"))
+        if notify and self._connection_listener:
+            try:
+                self._connection_listener(False, datetime.now(timezone.utc))
+            except:
+                pass
 
     def _notify(self, is_connected: bool):
         if self._connection_listener:
             try:
                 self._connection_listener(is_connected, datetime.now(timezone.utc))
-            except:
-                pass
+            except Exception:
+                LOGGER.exception("Connection listener hatası")
