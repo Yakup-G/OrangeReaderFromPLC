@@ -41,9 +41,10 @@ LOGGER = setup_logger()
 
 
 def create_payload(raw_data: dict) -> dict:
-    """Multi-device uyumlu payload oluşturur"""
+    """Agent'tan sunucuya gönderilecek veriyi hazırlar"""
     def get(label: str, default=0.0):
-        return raw_data.get(label, default)
+        val = raw_data.get(label)
+        return default if val is None else val
 
     running = bool(int(get("Çalışma Durumu", 0)))
     fault_code = int(get("Arıza Kodu", 0))
@@ -63,18 +64,13 @@ def create_payload(raw_data: dict) -> dict:
         "status": status,
         "hours_this_week": hours,
         "total_hours": hours,
-        "efficiency": 85,  # İleride hesaplanabilir
+        "efficiency": config.DEFAULT_EFFICIENCY,   # config'ten alıyoruz
         "fault_code": fault_code,
         "fault_message": FAULT_CODES.get(fault_code),
+        "temperature": round(get("Sıcaklık"), 1) if "Sıcaklık" in raw_data else None,
+        "rpm": int(get("Devir")) if "Devir" in raw_data else None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "agent_version": "1.2.0",
     }
-
-    # Opsiyonel sensörler
-    if "Sıcaklık" in raw_data:
-        payload["temperature"] = round(float(raw_data["Sıcaklık"]), 1)
-    if "Devir" in raw_data:
-        payload["rpm"] = int(raw_data["Devir"])
 
     return payload
 
@@ -87,12 +83,12 @@ def send_to_server(data: dict) -> bool:
         "X-API-Key": config.SERVER_API_KEY,
     }
     try:
-        resp = requests.post(url, json=data, headers=headers, timeout=8)
+        resp = requests.post(url, json=data, headers=headers, timeout=10)
         if resp.status_code == 200:
             LOGGER.debug("✓ Sunucuya gönderildi")
             return True
         else:
-            LOGGER.warning(f"Sunucu HTTP {resp.status_code}")
+            LOGGER.warning(f"Sunucu HTTP {resp.status_code}: {resp.text[:100]}")
             return False
     except Exception as e:
         LOGGER.warning(f"Sunucuya ulaşılamadı: {e}")
@@ -103,10 +99,11 @@ def on_connection_change(is_connected: bool, at: datetime):
     event = "connected" if is_connected else "disconnected"
     status = "on" if is_connected else "off"
     
-    LOGGER.info(f"{'✓' if is_connected else '✖'} PLC {event}: {config.PLC_IP}")
+    LOGGER.info(f"{'✓' if is_connected else '✖'} PLC {event}")
     
     payload = {
         "id": config.AGENT_ID,
+        "name": config.AGENT_NAME,
         "status": status,
         "event": event,
         "timestamp": at.isoformat(),
@@ -173,7 +170,7 @@ if __name__ == "__main__":
 
     if args.test:
         print("Test modu henüz güncellenmedi...")
-        exit()
+        exit(0)
 
     agent = Agent()
 
