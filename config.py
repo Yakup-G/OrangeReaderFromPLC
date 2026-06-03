@@ -23,7 +23,7 @@ from typing import List
 AGENT_ID = "CNC-01"
 
 # Bu Orange Pi'ye bağlı PLC'nin IP adresi (eth1 — PLC portu)
-PLC_IP   = "192.168.2.10"
+PLC_IP   = "192.168.250.11"
 PLC_PORT = 9600          # Omron N-Serisi varsayılan portu
 PLC_TIMEOUT = 5.0        # saniye
 
