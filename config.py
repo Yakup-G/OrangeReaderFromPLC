@@ -45,6 +45,7 @@ SERVER_API_KEY = "gizli-anahtar-buraya"
 READ_INTERVAL_SEC   = 5
 RECONNECT_DELAY_SEC = 5.0
 HEARTBEAT_INTERVAL_SEC = 30        # Sunucuya heartbeat gönderme aralığı
+DEFAULT_EFFICIENCY = 85            # ← Ekle (geçici verim değeri)
 
 LOG_FILE  = "logs/agent.log"
 LOG_LEVEL = "INFO"                 # DEBUG / INFO / WARNING
