@@ -22,6 +22,38 @@ import subprocess
 # OTOMATİK BENZERSİZ AGENT ID OLUŞTURMA
 # ──────────────────────────────────────────────
 
+def clean_default_route():
+    """192.168.250.254 gateway'li default route'u siler"""
+    try:
+        result = subprocess.run([
+            'ip', 'route', 'del', 
+            'default', 
+            'via', '192.168.250.254', 
+            'dev', 'lan0'
+        ], capture_output=True, text=True, check=False)
+
+        if result.returncode == 0:
+            print("✓ Default route silindi: via 192.168.250.254 dev lan0")
+        elif result.returncode == 2 or "No such process" in result.stderr:
+            print("→ Silinecek default route zaten yok.")
+        else:
+            print(f"→ Route silme uyarısı: {result.stderr.strip()}")
+            
+    except FileNotFoundError:
+        print("❌ 'ip' komutu bulunamadı!")
+    except Exception as e:
+        print(f"⚠️ Route temizleme hatası: {e}")
+
+
+# ====================== ANA KISIM ======================
+if __name__ == "__main__":
+    print("PLC Agent başlatılıyor...")
+    
+    # Route temizleme - script başlar başlamaz çalışır
+    clean_default_route()
+    
+    # Buradan sonra mevcut kodunuz devam eder...
+
 def get_unique_agent_id() -> str:
     """Cihazın MAC adresinden benzersiz ID oluşturur"""
     try:
