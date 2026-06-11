@@ -11,7 +11,8 @@ from typing import List, Union
 # 1. CİHAZ BİLGİLERİ
 # ═════════════════════════════════════════════
 
-AGENT_ID      = "CNC-01"
+# AGENT_ID      = "CNC-01"
+AGENT_ID = None
 AGENT_NAME    = "CNC Freze Makinesi #1"
 LOCATION      = "Üretim Hattı 1"
 
