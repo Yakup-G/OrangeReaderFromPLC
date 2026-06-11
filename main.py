@@ -15,7 +15,32 @@ import requests
 import config
 from plc_reader import PLCReader
 from config import PLCConfig, TAGS, FAULT_CODES
+import uuid
+import subprocess
 
+# ──────────────────────────────────────────────
+# OTOMATİK BENZERSİZ AGENT ID OLUŞTURMA
+# ──────────────────────────────────────────────
+
+def get_unique_agent_id() -> str:
+    """Cihazın MAC adresinden benzersiz ID oluşturur"""
+    try:
+        # MAC adresini al
+        result = subprocess.check_output("cat /sys/class/net/$(ip route show default | awk '/default/ {print $5}')/address", shell=True, text=True).strip()
+        mac = result.replace(":", "").upper()
+        
+        # Benzersiz ID oluştur
+        agent_id = f"ORANGE-{mac[-6:]}"   # Son 6 karakter + prefix
+        return agent_id
+    except Exception:
+        # Yedek olarak random ID
+        return f"ORANGE-{str(uuid.uuid4())[:8].upper()}"
+
+
+# Config'den AGENT_ID yoksa otomatik oluştur
+if not hasattr(config, 'AGENT_ID') or config.AGENT_ID is None or config.AGENT_ID == "":
+    config.AGENT_ID = get_unique_agent_id()
+    print(f"⚡ Otomatik Agent ID oluşturuldu: {config.AGENT_ID}")
 
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger("plc_agent")
