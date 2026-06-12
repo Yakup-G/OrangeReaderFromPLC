@@ -1,5 +1,5 @@
 """
-config.py  —  Orange Pi Agent Yapılandırması
+config.py  —  Orange Pi Agent Yaplandirmasi
 """
 
 from __future__ import annotations
@@ -54,11 +54,11 @@ class FinsTag:
 
 
 TAGS: List[FinsTag] = [
-    FinsTag(label="Calisma Durumu", memory_area="d", address=101, data_type="ui"),
-    FinsTag(label="Ariza Kodu",     memory_area="d", address=200, data_type="ui"),
-    FinsTag(label="Calisma Saati",  memory_area="d", address=100, data_type="ui", scale=1.0, unit="hours"),
-    FinsTag(label="Sicaklik",       memory_area="d", address=300, data_type="ui", scale=0.1, unit="C"),
-    FinsTag(label="Devir",          memory_area="d", address=400, data_type="ui", unit="rpm"),
+    FinsTag(label="\u00c7al\u0131\u015fma Durumu", memory_area="d", address=101, data_type="ui"),
+    FinsTag(label="Ar\u0131za Kodu",               memory_area="d", address=200, data_type="ui"),
+    FinsTag(label="\u00c7al\u0131\u015fma Saati",  memory_area="d", address=100, data_type="ui", scale=1.0, unit="hours"),
+    FinsTag(label="S\u0131cakl\u0131k",            memory_area="d", address=300, data_type="ui", scale=0.1, unit="C"),
+    FinsTag(label="Devir",                         memory_area="d", address=400, data_type="ui", unit="rpm"),
 ]
 
 
